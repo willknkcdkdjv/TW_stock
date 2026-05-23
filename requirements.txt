@@ -1,0 +1,7 @@
+streamlit
+pandas
+pyarrow
+requests
+xlsxwriter
+python-dotenv
+openai

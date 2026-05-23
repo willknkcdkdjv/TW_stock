@@ -1,0 +1,7 @@
+這個子資料夾裡面的檔案建立順序：
+
+1. generate_mapping.py
+2. 用1生出twse_api_links.csv 跟 mapping_table.md
+3. 用md_to_csv.py 產生 mapping_table_excel.csv
+
+
