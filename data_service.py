@@ -5,9 +5,16 @@ import numpy as np
 import pandas as pd
 
 from signal_engine import (
+    attach_breakout_metrics,
     breakout_mask,
+    confirmed_breakout_mask,
     get_breakout_signal,
+    get_confirmed_breakout_signal,
+    get_near_breakout_signal,
+    get_price_breakout_signal,
     get_volume_spike_signal,
+    near_breakout_mask,
+    price_breakout_mask,
     volume_spike_mask,
 )
 
@@ -32,8 +39,14 @@ def remove_duplicate_columns(df: pd.DataFrame | None) -> pd.DataFrame | None:
 
 DISPLAY_COLUMNS = [
     "date", "stock_id", "stock_name", "close", "return_pct", "volume",
-    "vol_ma20", "volume_ratio_20d", "amount", "ma5", "ma20", "high_20d_prev",
+    "vol_ma20", "volume_ratio_20d", "amount",
+    "turnover_ma20", "turnover_ratio_20d", "turnover_percentile_60d",
+    "ma5", "ma20", "high_20d_prev",
 ]
+
+TURNOVER_MA_WINDOW = 20
+TURNOVER_PERCENTILE_WINDOW = 60
+TURNOVER_PERCENTILE_MIN_OBS = 20
 
 
 def read_parquet_safe(path: Path) -> pd.DataFrame:
@@ -239,25 +252,77 @@ def load_valuation_data() -> pd.DataFrame:
     return remove_duplicate_columns(df)
 
 
+def _turnover_percentile_60d(amounts: pd.Series) -> pd.Series:
+    """Percentile rank of each amount vs up to 60 prior observations (same stock)."""
+    values = pd.to_numeric(amounts, errors="coerce").to_numpy(dtype=float)
+    out = np.full(len(values), np.nan, dtype=float)
+
+    for i in range(len(values)):
+        history = values[max(0, i - TURNOVER_PERCENTILE_WINDOW):i]
+        history = history[~np.isnan(history)]
+        if len(history) < TURNOVER_PERCENTILE_MIN_OBS:
+            continue
+
+        current = values[i]
+        if np.isnan(current):
+            continue
+
+        out[i] = float((history < current).sum() / len(history) * 100.0)
+
+    return pd.Series(out, index=amounts.index, dtype=float)
+
+
 def add_price_indicators(price: pd.DataFrame) -> pd.DataFrame:
     if price.empty:
         return price
 
     price = price.sort_values(["stock_id", "date"]).copy()
+    price = price.drop_duplicates(subset=["stock_id", "date"], keep="last")
 
     price["prev_close"] = price.groupby("stock_id")["close"].shift(1)
-    prev_close = pd.to_numeric(price["prev_close"], errors="coerce")
     close = pd.to_numeric(price["close"], errors="coerce")
-    price["return_pct"] = np.where(
-        prev_close.notna() & (prev_close != 0) & close.notna(),
-        (close / prev_close - 1) * 100,
-        np.nan,
+    prev_close = pd.to_numeric(price["prev_close"], errors="coerce")
+    change = pd.to_numeric(price["change"], errors="coerce")
+
+    price["return_pct"] = (close / prev_close - 1) * 100
+    price.loc[prev_close.isna() | (prev_close == 0) | close.isna(), "return_pct"] = np.nan
+
+    # When the latest row repeats the prior close but TWSE change is non-zero, use change.
+    twse_prev = close - change
+    stale_flat = (
+        prev_close.notna()
+        & close.notna()
+        & (close == prev_close)
+        & change.notna()
+        & (change != 0)
+        & twse_prev.notna()
+        & (twse_prev != 0)
     )
+    if stale_flat.any():
+        price.loc[stale_flat, "return_pct"] = (
+            change[stale_flat] / twse_prev[stale_flat]
+        ) * 100
 
     price["vol_ma20"] = price.groupby("stock_id")["volume"].transform(
         lambda x: x.rolling(20, min_periods=5).mean()
     )
     price["volume_ratio_20d"] = price["volume"] / price["vol_ma20"]
+
+    amount = pd.to_numeric(price["amount"], errors="coerce")
+    price["turnover_ma20"] = price.groupby("stock_id")["amount"].transform(
+        lambda x: pd.to_numeric(x, errors="coerce").rolling(
+            TURNOVER_MA_WINDOW, min_periods=TURNOVER_MA_WINDOW
+        ).mean()
+    )
+    turnover_ma20 = pd.to_numeric(price["turnover_ma20"], errors="coerce")
+    price["turnover_ratio_20d"] = np.where(
+        turnover_ma20.notna() & (turnover_ma20 != 0) & amount.notna(),
+        amount / turnover_ma20,
+        np.nan,
+    )
+    price["turnover_percentile_60d"] = price.groupby("stock_id", group_keys=False)[
+        "amount"
+    ].transform(_turnover_percentile_60d)
 
     price["ma5"] = price.groupby("stock_id")["close"].transform(
         lambda x: x.rolling(5, min_periods=3).mean()
@@ -339,8 +404,71 @@ def get_volume_spike(filtered: pd.DataFrame, limit: int = 100) -> pd.DataFrame:
 
 def get_breakout(filtered: pd.DataFrame, limit: int = 100) -> pd.DataFrame:
     return remove_duplicate_columns(
-        _select_display_columns(get_breakout_signal(filtered)).head(limit)
+        _select_display_columns(get_confirmed_breakout_signal(filtered)).head(limit)
     )
+
+
+def get_price_breakout(filtered: pd.DataFrame, limit: int = 100) -> pd.DataFrame:
+    return remove_duplicate_columns(
+        _select_display_columns(get_price_breakout_signal(filtered)).head(limit)
+    )
+
+
+def get_confirmed_breakout(filtered: pd.DataFrame, limit: int = 100) -> pd.DataFrame:
+    return remove_duplicate_columns(
+        _select_display_columns(get_confirmed_breakout_signal(filtered)).head(limit)
+    )
+
+
+def get_near_breakout(filtered: pd.DataFrame, limit: int = 100) -> pd.DataFrame:
+    return remove_duplicate_columns(
+        _select_display_columns(get_near_breakout_signal(filtered, limit=limit))
+    )
+
+
+def breakout_debug_summary(
+    latest: pd.DataFrame,
+    sidebar_filtered: pd.DataFrame,
+) -> dict:
+    if latest is None or latest.empty:
+        return {
+            "valid_high_20d_prev_rows": 0,
+            "confirmed_breakout_count": 0,
+            "price_breakout_count": 0,
+            "near_breakout_count": 0,
+            "rows_removed_by_filters": 0,
+        }
+
+    work = attach_breakout_metrics(latest)
+    close = pd.to_numeric(work.get("close"), errors="coerce")
+    high_20d_prev = pd.to_numeric(work.get("high_20d_prev"), errors="coerce")
+    valid_high = int((close.notna() & high_20d_prev.notna()).sum())
+
+    confirmed_mask = confirmed_breakout_mask(work)
+    price_mask = price_breakout_mask(work)
+    near_mask = near_breakout_mask(work)
+    confirmed_count = int(confirmed_mask.sum())
+    price_count = int(price_mask.sum())
+    near_count = int(near_mask.sum())
+
+    removed = 0
+    if "stock_id" in work.columns:
+        candidate_ids = set()
+        candidate_ids.update(work.loc[price_mask, "stock_id"].astype(str))
+        candidate_ids.update(work.loc[near_mask, "stock_id"].astype(str))
+        if sidebar_filtered is None or sidebar_filtered.empty:
+            removed = len(candidate_ids)
+        elif "stock_id" in sidebar_filtered.columns:
+            filtered_ids = set(sidebar_filtered["stock_id"].astype(str))
+            removed = len(candidate_ids - filtered_ids)
+
+    return {
+        "valid_high_20d_prev_rows": valid_high,
+        "confirmed_breakout_count": confirmed_count,
+        "price_breakout_count": price_count,
+        "near_breakout_count": near_count,
+        "rows_removed_by_filters": removed,
+    }
 
 
 def get_top_turnover(filtered: pd.DataFrame, limit: int = 100) -> pd.DataFrame:
@@ -493,17 +621,30 @@ def get_industry_trend(filtered: pd.DataFrame) -> pd.DataFrame:
 
     df["industry_name"] = df["industry"].apply(map_industry_to_name)
 
-    df["is_up"] = df["return_pct"] > 0
-    df["is_down"] = df["return_pct"] < 0
+    if "return_pct" in df.columns:
+        df["return_pct"] = pd.to_numeric(df["return_pct"], errors="coerce")
+    else:
+        df["return_pct"] = np.nan
+
+    df["is_up"] = df["return_pct"].notna() & (df["return_pct"] > 0)
+    df["is_down"] = df["return_pct"].notna() & (df["return_pct"] < 0)
     df["is_volume_spike"] = volume_spike_mask(df)
     df["is_breakout"] = breakout_mask(df)
+
+    def _mean_valid(series: pd.Series) -> float:
+        valid = series.dropna()
+        return float(valid.mean()) if not valid.empty else np.nan
+
+    def _median_valid(series: pd.Series) -> float:
+        valid = series.dropna()
+        return float(valid.median()) if not valid.empty else np.nan
 
     trend = df.groupby("industry_name", dropna=False, as_index=False).agg(
         stock_count=("stock_id", "nunique"),
         up_count=("is_up", "sum"),
         down_count=("is_down", "sum"),
-        avg_return_pct=("return_pct", "mean"),
-        median_return_pct=("return_pct", "median"),
+        avg_return_pct=("return_pct", _mean_valid),
+        median_return_pct=("return_pct", _median_valid),
         total_turnover=("amount", "sum"),
         volume_spike_count=("is_volume_spike", "sum"),
         breakout_count=("is_breakout", "sum"),
@@ -534,6 +675,7 @@ def get_subsector_trend(filtered: pd.DataFrame) -> pd.DataFrame:
     else:
         returns = pd.Series(np.nan, index=df.index, dtype=float)
 
+    df["return_pct"] = returns
     df["is_up"] = returns.notna() & (returns > 0)
     df["is_down"] = returns.notna() & (returns < 0)
     df["is_volume_spike"] = volume_spike_mask(df)
@@ -542,12 +684,20 @@ def get_subsector_trend(filtered: pd.DataFrame) -> pd.DataFrame:
     if "amount" in df.columns:
         df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
 
+    def _mean_valid(series: pd.Series) -> float:
+        valid = series.dropna()
+        return float(valid.mean()) if not valid.empty else np.nan
+
+    def _median_valid(series: pd.Series) -> float:
+        valid = series.dropna()
+        return float(valid.median()) if not valid.empty else np.nan
+
     trend = df.groupby("sub_sector", dropna=False, as_index=False).agg(
         stock_count=("stock_id", "nunique"),
         up_count=("is_up", "sum"),
         down_count=("is_down", "sum"),
-        avg_return_pct=("return_pct", "mean"),
-        median_return_pct=("return_pct", "median"),
+        avg_return_pct=("return_pct", _mean_valid),
+        median_return_pct=("return_pct", _median_valid),
         total_turnover=("amount", "sum"),
         volume_spike_count=("is_volume_spike", "sum"),
         breakout_count=("is_breakout", "sum"),

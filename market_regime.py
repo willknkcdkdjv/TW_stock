@@ -19,28 +19,37 @@ def _amount_series(df: pd.DataFrame) -> pd.Series:
     return pd.to_numeric(df["amount"], errors="coerce")
 
 
+def _empty_breadth() -> dict:
+    return {
+        "total_stocks": 0,
+        "up_count": None,
+        "down_count": None,
+        "flat_count": None,
+        "up_ratio": None,
+        "advance_decline_ratio": None,
+        "average_return": None,
+        "median_return": None,
+        "has_valid_returns": False,
+    }
+
+
 def get_market_breadth(df: pd.DataFrame) -> dict:
     if df.empty:
-        return {
-            "total_stocks": 0,
-            "up_count": 0,
-            "down_count": 0,
-            "flat_count": 0,
-            "up_ratio": 0.0,
-            "advance_decline_ratio": 0.0,
-            "average_return": 0.0,
-            "median_return": 0.0,
-        }
+        return _empty_breadth()
 
     returns = _return_series(df)
     valid = returns.notna()
+    if not valid.any():
+        return _empty_breadth()
+
+    valid_returns = returns[valid]
     total_stocks = int(valid.sum())
 
-    up_count = int((returns > FLAT_RETURN_THRESHOLD).sum())
-    down_count = int((returns < -FLAT_RETURN_THRESHOLD).sum())
+    up_count = int((valid_returns > FLAT_RETURN_THRESHOLD).sum())
+    down_count = int((valid_returns < -FLAT_RETURN_THRESHOLD).sum())
     flat_count = int(total_stocks - up_count - down_count)
 
-    up_ratio = up_count / total_stocks if total_stocks else 0.0
+    up_ratio = up_count / total_stocks if total_stocks else None
     if down_count > 0:
         advance_decline_ratio = up_count / down_count
     elif up_count > 0:
@@ -53,28 +62,33 @@ def get_market_breadth(df: pd.DataFrame) -> dict:
         "up_count": up_count,
         "down_count": down_count,
         "flat_count": flat_count,
-        "up_ratio": round(up_ratio, 4),
+        "up_ratio": round(up_ratio, 4) if up_ratio is not None else None,
         "advance_decline_ratio": round(advance_decline_ratio, 4),
-        "average_return": round(float(returns.mean()), 4) if valid.any() else 0.0,
-        "median_return": round(float(returns.median()), 4) if valid.any() else 0.0,
+        "average_return": round(float(valid_returns.mean()), 4),
+        "median_return": round(float(valid_returns.median()), 4),
+        "has_valid_returns": True,
+    }
+
+
+def _empty_cap_comparison() -> dict:
+    return {
+        "large_cap_avg_return": None,
+        "small_cap_avg_return": None,
+        "large_cap_up_ratio": None,
+        "small_cap_up_ratio": None,
+        "has_valid_returns": False,
     }
 
 
 def get_large_vs_small_cap(df: pd.DataFrame) -> dict:
-    empty = {
-        "large_cap_avg_return": 0.0,
-        "small_cap_avg_return": 0.0,
-        "large_cap_up_ratio": 0.0,
-        "small_cap_up_ratio": 0.0,
-    }
     if df.empty:
-        return empty
+        return _empty_cap_comparison()
 
     returns = _return_series(df)
     amount = _amount_series(df)
     valid = returns.notna() & amount.notna()
     if not valid.any():
-        return empty
+        return _empty_cap_comparison()
 
     work = df.loc[valid, ["return_pct", "amount"]].copy()
     work["return_pct"] = pd.to_numeric(work["return_pct"], errors="coerce")
@@ -86,20 +100,25 @@ def get_large_vs_small_cap(df: pd.DataFrame) -> dict:
     large_cap = work[work["amount"] >= large_threshold]
     small_cap = work[work["amount"] <= small_threshold]
 
-    def _up_ratio(group: pd.DataFrame) -> float:
+    def _up_ratio(group: pd.DataFrame) -> float | None:
         if group.empty:
-            return 0.0
+            return None
         return float((group["return_pct"] > FLAT_RETURN_THRESHOLD).mean())
 
+    def _avg_return(group: pd.DataFrame) -> float | None:
+        if group.empty:
+            return None
+        return round(float(group["return_pct"].mean()), 4)
+
+    large_up = _up_ratio(large_cap)
+    small_up = _up_ratio(small_cap)
+
     return {
-        "large_cap_avg_return": round(float(large_cap["return_pct"].mean()), 4)
-        if not large_cap.empty
-        else 0.0,
-        "small_cap_avg_return": round(float(small_cap["return_pct"].mean()), 4)
-        if not small_cap.empty
-        else 0.0,
-        "large_cap_up_ratio": round(_up_ratio(large_cap), 4),
-        "small_cap_up_ratio": round(_up_ratio(small_cap), 4),
+        "large_cap_avg_return": _avg_return(large_cap),
+        "small_cap_avg_return": _avg_return(small_cap),
+        "large_cap_up_ratio": round(large_up, 4) if large_up is not None else None,
+        "small_cap_up_ratio": round(small_up, 4) if small_up is not None else None,
+        "has_valid_returns": True,
     }
 
 
@@ -122,7 +141,7 @@ def get_sector_leadership(
         if sort_col not in industry_df.columns:
             result[key] = pd.DataFrame()
             continue
-        ranked = industry_df.sort_values(sort_col, ascending=False).head(top_n)
+        ranked = industry_df.sort_values(sort_col, ascending=False, na_position="last").head(top_n)
         result[key] = ranked.reset_index(drop=True)
     return result
 
@@ -134,14 +153,20 @@ def get_market_regime_summary(
 ) -> str:
     comments: list[str] = []
 
+    if not breadth.get("has_valid_returns"):
+        return "資料不足，無法判斷市場體質（缺少有效 return_pct）。"
+
     total = breadth.get("total_stocks", 0)
     if total == 0:
         return "資料不足，無法判斷市場體質。"
 
-    up_ratio = breadth.get("up_ratio", 0.0)
-    ad_ratio = breadth.get("advance_decline_ratio", 0.0)
-    avg_return = breadth.get("average_return", 0.0)
-    median_return = breadth.get("median_return", 0.0)
+    up_ratio = breadth.get("up_ratio")
+    ad_ratio = breadth.get("advance_decline_ratio")
+    avg_return = breadth.get("average_return")
+    median_return = breadth.get("median_return")
+
+    if up_ratio is None or ad_ratio is None or avg_return is None or median_return is None:
+        return "資料不足，無法判斷市場體質（缺少有效 return_pct）。"
 
     if up_ratio >= 0.6 and ad_ratio >= 1.2:
         comments.append("市場廣度偏強，上漲家數具廣泛參與。")
@@ -154,18 +179,24 @@ def get_market_regime_summary(
     else:
         comments.append("市場廣度中性，多空力量大致均衡。")
 
-    large_ret = large_vs_small.get("large_cap_avg_return", 0.0)
-    small_ret = large_vs_small.get("small_cap_avg_return", 0.0)
-    large_up = large_vs_small.get("large_cap_up_ratio", 0.0)
-    small_up = large_vs_small.get("small_cap_up_ratio", 0.0)
-    ret_spread = large_ret - small_ret
+    large_ret = large_vs_small.get("large_cap_avg_return")
+    small_ret = large_vs_small.get("small_cap_avg_return")
+    large_up = large_vs_small.get("large_cap_up_ratio")
+    small_up = large_vs_small.get("small_cap_up_ratio")
 
-    if ret_spread >= 0.3 and large_up >= small_up + 0.05:
-        comments.append("大型股領漲，資金偏向高成交核心標的。")
-    elif ret_spread <= -0.3 and small_up >= large_up + 0.05:
-        comments.append("小型股表現優於大型股，投機與輪動特徵較明顯。")
-    elif abs(ret_spread) < 0.15:
-        comments.append("大小型股表現差距不大，風格未明顯分化。")
+    if (
+        large_ret is not None
+        and small_ret is not None
+        and large_up is not None
+        and small_up is not None
+    ):
+        ret_spread = large_ret - small_ret
+        if ret_spread >= 0.3 and large_up >= small_up + 0.05:
+            comments.append("大型股領漲，資金偏向高成交核心標的。")
+        elif ret_spread <= -0.3 and small_up >= large_up + 0.05:
+            comments.append("小型股表現優於大型股，投機與輪動特徵較明顯。")
+        elif abs(ret_spread) < 0.15:
+            comments.append("大小型股表現差距不大，風格未明顯分化。")
 
     top_return = sector_leadership.get("top_by_avg_return_pct", pd.DataFrame())
     top_turnover = sector_leadership.get("top_by_total_turnover", pd.DataFrame())
@@ -174,8 +205,9 @@ def get_market_regime_summary(
 
     if not top_return.empty and "industry" in top_return.columns:
         leader = top_return.iloc[0]["industry"]
-        leader_ret = top_return.iloc[0].get("avg_return_pct", 0.0)
-        comments.append(f"產業輪動上，{leader}（平均漲幅 {leader_ret:.2f}%）相對領先。")
+        leader_ret = top_return.iloc[0].get("avg_return_pct")
+        if pd.notna(leader_ret):
+            comments.append(f"產業輪動上，{leader}（平均漲幅 {leader_ret:.2f}%）相對領先。")
 
     if not top_turnover.empty and "industry" in top_turnover.columns:
         turnover_leader = top_turnover.iloc[0]["industry"]
@@ -183,9 +215,7 @@ def get_market_regime_summary(
 
     total_breakouts = 0
     total_spikes = 0
-    industry_count = 0
     if not top_breakout.empty:
-        industry_count = max(industry_count, len(top_breakout))
         if "breakout_count" in top_breakout.columns:
             total_breakouts = int(top_breakout["breakout_count"].sum())
     if not top_spike.empty and "volume_spike_count" in top_spike.columns:

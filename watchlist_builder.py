@@ -1,17 +1,14 @@
 import numpy as np
 import pandas as pd
 
-from data_service import apply_sector_mapping
-from signal_engine import (
-    breakout_mask,
-    momentum_mask,
-    relative_strength_mask,
-    score_signals,
-    volume_spike_reason_mask,
-)
+from data_service import apply_sector_mapping, get_subsector_trend
+from signal_engine import calculate_hotness_score, score_signals
 
 MIN_WATCHLIST_AMOUNT = 50_000_000
-MIN_WATCHLIST_SIGNAL_SCORE = 1
+MIN_WATCHLIST_TECHNICAL_SCORE = 0
+
+TURNOVER_PERCENTILE_HOT = 90
+TECHNICAL_SCORE_HIGH = 2
 
 OUTPUT_COLUMNS = [
     "stock_id",
@@ -21,8 +18,11 @@ OUTPUT_COLUMNS = [
     "close",
     "return_pct",
     "amount",
-    "volume_ratio_20d",
-    "signal_score",
+    "turnover_ratio_20d",
+    "turnover_percentile_60d",
+    "hotness_score",
+    "hotness_reason",
+    "technical_score",
     "signal_reason",
     "observation_focus",
 ]
@@ -45,88 +45,100 @@ def _fill_missing_indicators(df: pd.DataFrame) -> pd.DataFrame:
     result = df.copy()
 
     numeric_cols = [
-        "close", "return_pct", "amount", "volume_ratio_20d",
-        "ma5", "ma20", "high_20d_prev",
+        "close",
+        "return_pct",
+        "amount",
+        "turnover_ratio_20d",
+        "turnover_percentile_60d",
+        "hotness_score",
+        "technical_score",
     ]
     for col in numeric_cols:
         if col in result.columns:
             result[col] = pd.to_numeric(result[col], errors="coerce")
-
-    if "volume_ratio_20d" not in result.columns:
-        result["volume_ratio_20d"] = np.nan
-    if "ma5" not in result.columns:
-        result["ma5"] = np.nan
-    if "ma20" not in result.columns:
-        result["ma20"] = np.nan
-    if "high_20d_prev" not in result.columns:
-        result["high_20d_prev"] = np.nan
+        else:
+            result[col] = np.nan
 
     return result
 
 
-def _build_signal_reason_row(
-    volume_spike: bool,
-    breakout: bool,
-    momentum: bool,
-    relative_strength: bool,
-    high_turnover: bool,
-) -> str:
-    reasons: list[str] = []
-    if high_turnover:
-        reasons.append("高成交金額")
-    if volume_spike:
-        reasons.append("量能放大")
-    if breakout:
-        reasons.append("突破前高")
-    if momentum:
-        reasons.append("短線動能")
-    if relative_strength:
-        reasons.append("相對強勢")
-    return "、".join(reasons)
+def _ensure_industry_column(df: pd.DataFrame) -> pd.DataFrame:
+    result = df.copy()
+    if "industry" not in result.columns and "industry_name" in result.columns:
+        result["industry"] = result["industry_name"]
+    return result
+
+
+def _ensure_watchlist_scores(df: pd.DataFrame, market_return: float) -> pd.DataFrame:
+    """Ensure technical_score, hotness_score, and signal_reason are present."""
+    if df.empty:
+        return df.copy()
+
+    subsector_trend = get_subsector_trend(df)
+    result = df.copy()
+
+    if "technical_score" not in result.columns:
+        if "signal_score" in result.columns and "signal_reason" in result.columns:
+            result["technical_score"] = result["signal_score"]
+        else:
+            result = score_signals(
+                result,
+                market_return=market_return,
+                subsector_trend_df=subsector_trend,
+            )
+
+    if "hotness_score" not in result.columns:
+        result = calculate_hotness_score(
+            result,
+            market_return=market_return,
+            subsector_trend_df=subsector_trend,
+        )
+
+    if "signal_reason" not in result.columns:
+        result = score_signals(
+            result,
+            market_return=market_return,
+            subsector_trend_df=subsector_trend,
+        )
+        if "technical_score" not in result.columns and "signal_score" in result.columns:
+            result["technical_score"] = result["signal_score"]
+
+    return result
 
 
 def _build_observation_focus(
-    volume_spike: bool,
-    breakout: bool,
-    momentum: bool,
-    high_turnover: bool,
+    hotness_reason: str,
+    turnover_percentile_60d: float,
+    technical_score: float,
 ) -> str:
-    focuses: list[str] = []
-    if breakout:
-        focuses.append("觀察是否站穩突破區與量能是否延續")
-    if volume_spike:
-        focuses.append("觀察放量後是否續強或轉為爆量反轉")
-    if momentum:
-        focuses.append("觀察短期均線是否維持多頭排列")
-    if high_turnover:
-        focuses.append("觀察資金是否持續集中")
-    if focuses:
-        return "；".join(focuses)
+    reason = str(hotness_reason or "")
+    percentile = pd.to_numeric(turnover_percentile_60d, errors="coerce")
+
+    if pd.notna(percentile) and percentile >= TURNOVER_PERCENTILE_HOT:
+        return "觀察市場關注是否延續，避免單日爆量反轉"
+    if "60日高分位" in reason:
+        return "觀察市場關注是否延續，避免單日爆量反轉"
+    if "熱門族群" in reason:
+        return "觀察熱門族群是否持續擴散"
+
+    tech = pd.to_numeric(technical_score, errors="coerce")
+    if pd.notna(tech) and tech >= TECHNICAL_SCORE_HIGH:
+        return "觀察技術型態是否延續"
+
     return "僅列為資料觀察"
 
 
-def _annotate_signals(work: pd.DataFrame, market_return: float) -> pd.DataFrame:
-    volume_spike = volume_spike_reason_mask(work)
-    breakout = breakout_mask(work)
-    momentum = momentum_mask(work)
-    relative_strength = relative_strength_mask(work, market_return)
+def _annotate_observation_focus(work: pd.DataFrame) -> pd.DataFrame:
+    result = work.copy()
+    hotness_reason = result.get("hotness_reason", pd.Series("", index=result.index))
+    turnover_percentile = _col_numeric(result, "turnover_percentile_60d")
+    technical_score = _col_numeric(result, "technical_score")
 
-    if "high_turnover_signal" in work.columns:
-        high_turnover = work["high_turnover_signal"].fillna(False).astype(bool)
-    else:
-        high_turnover = pd.Series(False, index=work.index)
-
-    work["signal_reason"] = [
-        _build_signal_reason_row(vs, bo, mo, rs, ht)
-        for vs, bo, mo, rs, ht in zip(
-            volume_spike, breakout, momentum, relative_strength, high_turnover
-        )
+    result["observation_focus"] = [
+        _build_observation_focus(hr, tp, ts)
+        for hr, tp, ts in zip(hotness_reason, turnover_percentile, technical_score)
     ]
-    work["observation_focus"] = [
-        _build_observation_focus(vs, bo, mo, ht)
-        for vs, bo, mo, ht in zip(volume_spike, breakout, momentum, high_turnover)
-    ]
-    return work
+    return result
 
 
 def _ensure_sub_sector(df: pd.DataFrame) -> pd.DataFrame:
@@ -168,78 +180,126 @@ def _apply_industry_filters(
 
 
 def _sort_watchlist(df: pd.DataFrame) -> pd.DataFrame:
-    sort_cols = ["signal_score"]
-    for col in ("amount", "return_pct"):
-        if col in df.columns:
-            sort_cols.append(col)
+    sort_cols = [
+        col
+        for col in (
+            "hotness_score",
+            "technical_score",
+            "turnover_percentile_60d",
+            "amount",
+        )
+        if col in df.columns
+    ]
+    if not sort_cols:
+        return df
     return df.sort_values(sort_cols, ascending=[False] * len(sort_cols))
-
-
-def _fallback_turnover_watchlist(
-    work: pd.DataFrame, min_amount: float, max_rows: int
-) -> pd.DataFrame:
-    amount = _col_numeric(work, "amount")
-    fallback = work[_valid_identity_mask(work) & (amount >= min_amount)].copy()
-    if fallback.empty:
-        return pd.DataFrame(columns=OUTPUT_COLUMNS)
-
-    fallback = _sort_watchlist(fallback).head(max_rows)
-    fallback["signal_reason"] = "高成交金額"
-    fallback["observation_focus"] = "觀察資金是否持續集中"
-    if "signal_score" not in fallback.columns:
-        fallback["signal_score"] = 0
-    return fallback
 
 
 def watchlist_debug_summary(
     df: pd.DataFrame,
     min_amount: float,
-    min_signal_score: int,
+    min_hotness_score: float = 0,
+    min_technical_score: int = MIN_WATCHLIST_TECHNICAL_SCORE,
     industry: str = "All",
     sub_sector: str = "All",
+    min_signal_score: int | None = None,
 ) -> dict:
+    if min_signal_score is not None:
+        min_technical_score = min_signal_score
+
     if df.empty:
         return {
             "latest_rows": 0,
             "rows_with_amount": 0,
-            "rows_with_signal_score": 0,
-            "max_signal_score": 0,
-            "top_amount_stocks": pd.DataFrame(),
+            "rows_with_hotness_score": 0,
+            "rows_with_technical_score": 0,
+            "max_hotness_score": 0.0,
+            "max_technical_score": 0,
+            "top_activity_stocks": pd.DataFrame(),
         }
 
     work = _apply_industry_filters(_fill_missing_indicators(df.copy()), industry, sub_sector)
-    if "signal_score" not in work.columns:
-        work = score_signals(work, _market_median_return(work))
+    if work.empty:
+        return {
+            "latest_rows": 0,
+            "rows_with_amount": 0,
+            "rows_with_hotness_score": 0,
+            "rows_with_technical_score": 0,
+            "max_hotness_score": 0.0,
+            "max_technical_score": 0,
+            "top_activity_stocks": pd.DataFrame(),
+        }
+
+    market_return = _market_median_return(work)
+    work = _ensure_watchlist_scores(work, market_return)
 
     amount = _col_numeric(work, "amount")
-    signal_score = _col_numeric(work, "signal_score").fillna(0)
+    hotness_score = _col_numeric(work, "hotness_score").fillna(0)
+    technical_score = _col_numeric(work, "technical_score").fillna(0)
 
-    top_amount = work.copy()
-    if "amount" in top_amount.columns:
-        top_amount = top_amount.sort_values("amount", ascending=False).head(10)
+    top_activity = work.copy()
+    activity_cols = [
+        "hotness_score",
+        "technical_score",
+        "turnover_percentile_60d",
+        "turnover_ratio_20d",
+    ]
+    present = [c for c in activity_cols if c in top_activity.columns]
+    if present:
+        top_activity = top_activity.sort_values(
+            present, ascending=[False] * len(present)
+        ).head(10)
+    elif "amount" in top_activity.columns:
+        top_activity = top_activity.sort_values("amount", ascending=False).head(10)
 
     display_cols = [
-        c for c in ["stock_id", "stock_name", "amount", "signal_score", "return_pct"]
-        if c in top_amount.columns
+        c
+        for c in [
+            "stock_id",
+            "stock_name",
+            "hotness_score",
+            "technical_score",
+            "turnover_percentile_60d",
+            "turnover_ratio_20d",
+            "amount",
+            "return_pct",
+        ]
+        if c in top_activity.columns
     ]
 
-    return {
+    summary = {
         "latest_rows": len(work),
         "rows_with_amount": int((amount >= min_amount).sum()),
-        "rows_with_signal_score": int((signal_score >= min_signal_score).sum()),
-        "max_signal_score": int(signal_score.max()) if len(work) else 0,
-        "top_amount_stocks": top_amount[display_cols] if display_cols else top_amount,
+        "rows_with_hotness_score": int((hotness_score >= min_hotness_score).sum()),
+        "rows_with_technical_score": int((technical_score >= min_technical_score).sum()),
+        "max_hotness_score": float(hotness_score.max()) if len(work) else 0.0,
+        "max_technical_score": int(technical_score.max()) if len(work) else 0,
+        "top_activity_stocks": top_activity[display_cols] if display_cols else top_activity,
+        # Backward compatibility for web_app debug panel
+        "rows_with_signal_score": int((technical_score >= min_technical_score).sum()),
+        "max_signal_score": int(technical_score.max()) if len(work) else 0,
+        "top_amount_stocks": top_activity[display_cols] if display_cols else top_activity,
     }
+    return summary
 
 
 def build_watchlist(
     df: pd.DataFrame,
     max_rows: int = 50,
     min_amount: float = MIN_WATCHLIST_AMOUNT,
-    min_signal_score: int = MIN_WATCHLIST_SIGNAL_SCORE,
+    min_hotness_score: float = 0,
+    min_technical_score: int | None = None,
+    min_signal_score: int | None = None,
     industry: str = "All",
     sub_sector: str = "All",
 ) -> pd.DataFrame:
+    if min_technical_score is None:
+        min_technical_score = (
+            min_signal_score
+            if min_signal_score is not None
+            else MIN_WATCHLIST_TECHNICAL_SCORE
+        )
+
     if df.empty:
         return pd.DataFrame(columns=OUTPUT_COLUMNS)
 
@@ -249,28 +309,25 @@ def build_watchlist(
         return pd.DataFrame(columns=OUTPUT_COLUMNS)
 
     market_return = _market_median_return(work)
-    work = score_signals(work, market_return)
-    work = _annotate_signals(work, market_return)
+    work = _ensure_watchlist_scores(work, market_return)
+    work = _annotate_observation_focus(work)
+    work = _ensure_industry_column(work)
 
     amount = _col_numeric(work, "amount")
-    signal_score = _col_numeric(work, "signal_score").fillna(0)
+    hotness_score = _col_numeric(work, "hotness_score").fillna(0)
+    technical_score = _col_numeric(work, "technical_score").fillna(0)
 
     filtered = work[
         _valid_identity_mask(work)
         & (amount >= min_amount)
-        & (signal_score >= min_signal_score)
+        & (hotness_score >= min_hotness_score)
+        & (technical_score >= min_technical_score)
     ].copy()
 
     if filtered.empty:
-        if int(signal_score.max()) == 0:
-            filtered = _fallback_turnover_watchlist(work, min_amount, max_rows)
-    else:
-        filtered = _sort_watchlist(filtered).head(max_rows)
-        empty_reason = filtered["signal_reason"].astype(str).str.strip() == ""
-        filtered.loc[empty_reason, "signal_reason"] = "高成交金額"
-
-    if filtered.empty:
         return pd.DataFrame(columns=OUTPUT_COLUMNS)
+
+    filtered = _sort_watchlist(filtered).head(max_rows)
 
     for col in OUTPUT_COLUMNS:
         if col not in filtered.columns:

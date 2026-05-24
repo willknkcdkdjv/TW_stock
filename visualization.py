@@ -1,4 +1,4 @@
-"""Plotly chart helpers for the TW Stock Streamlit dashboard."""
+"""Reusable Plotly visualization helpers for the TW Stock dashboard."""
 
 from __future__ import annotations
 
@@ -6,14 +6,19 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
-COLOR_POSITIVE = "rgb(40, 167, 69)"
-COLOR_NEGATIVE = "rgb(220, 53, 69)"
+# Taiwan market convention: up = red, down = green
+COLOR_UP = "rgb(220, 53, 69)"
+COLOR_DOWN = "rgb(40, 167, 69)"
 COLOR_NEUTRAL = "rgb(128, 128, 128)"
 
+# Backward-compatible aliases
+COLOR_POSITIVE = COLOR_UP
+COLOR_NEGATIVE = COLOR_DOWN
+
 RETURN_COLOR_SCALE = [
-    [0.0, COLOR_NEGATIVE],
+    [0.0, COLOR_DOWN],
     [0.5, COLOR_NEUTRAL],
-    [1.0, COLOR_POSITIVE],
+    [1.0, COLOR_UP],
 ]
 
 TREEMAP_HOVER_FIELDS = [
@@ -25,9 +30,11 @@ TREEMAP_HOVER_FIELDS = [
     "breakout_count",
 ]
 
+TREEMAP_REQUIRED_COLUMNS = {"total_turnover", "avg_return_pct"}
 
-def format_return_color(value) -> str:
-    """Return a CSS color for a return value (positive/negative/neutral)."""
+
+def get_tw_return_color(value) -> str:
+    """Taiwan convention: positive=red, negative=green, zero/missing=gray."""
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return COLOR_NEUTRAL
     try:
@@ -37,47 +44,61 @@ def format_return_color(value) -> str:
     if pd.isna(numeric):
         return COLOR_NEUTRAL
     if numeric > 0:
-        return COLOR_POSITIVE
+        return COLOR_UP
     if numeric < 0:
-        return COLOR_NEGATIVE
+        return COLOR_DOWN
     return COLOR_NEUTRAL
 
 
-def _empty_figure(message: str = "No data available") -> go.Figure:
-    fig = go.Figure()
-    fig.add_annotation(
-        text=message,
-        xref="paper",
-        yref="paper",
-        x=0.5,
-        y=0.5,
-        showarrow=False,
-        font={"size": 14, "color": COLOR_NEUTRAL},
-    )
-    fig.update_layout(
-        margin={"t": 30, "l": 10, "r": 10, "b": 10},
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-    )
-    return fig
+def format_return_color(value) -> str:
+    """Alias for get_tw_return_color (backward compatibility)."""
+    return get_tw_return_color(value)
+
+
+def format_large_number(value) -> str:
+    """Format numbers with Taiwan-friendly 億 / 萬 units."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return "N/A"
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return "N/A"
+    if pd.isna(numeric):
+        return "N/A"
+
+    yi = 100_000_000
+    if abs(numeric) >= yi:
+        return f"{numeric / yi:.1f}億"
+
+    wan = 10_000
+    if abs(numeric) >= wan:
+        return f"{numeric / wan:.1f}萬"
+
+    return f"{numeric:,.0f}"
 
 
 def _coerce_numeric(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce")
 
 
+def _has_required_treemap_columns(df: pd.DataFrame, label_col: str) -> bool:
+    if df is None or df.empty:
+        return False
+    if label_col not in df.columns:
+        return False
+    return TREEMAP_REQUIRED_COLUMNS.issubset(df.columns)
+
+
 def _prepare_trend_df(df: pd.DataFrame, label_col: str) -> pd.DataFrame:
-    if df is None or df.empty or label_col not in df.columns:
+    if not _has_required_treemap_columns(df, label_col):
         return pd.DataFrame()
 
     work = df.copy()
     work[label_col] = work[label_col].astype(str).str.strip()
     work = work[work[label_col].notna() & (work[label_col] != "")]
 
-    if "total_turnover" in work.columns:
-        work["total_turnover"] = _coerce_numeric(work["total_turnover"]).fillna(0)
-    else:
-        work["total_turnover"] = 0.0
+    work["total_turnover"] = _coerce_numeric(work["total_turnover"]).fillna(0)
+    work["avg_return_pct"] = _coerce_numeric(work["avg_return_pct"])
 
     for col in TREEMAP_HOVER_FIELDS:
         if col in work.columns and col != label_col:
@@ -107,27 +128,29 @@ def _render_trend_treemap(
     df: pd.DataFrame,
     label_col: str,
     title: str,
-) -> go.Figure:
+) -> go.Figure | None:
+    if not _has_required_treemap_columns(df, label_col):
+        return None
+
     work = _prepare_trend_df(df, label_col)
     if work.empty:
-        return _empty_figure(f"No {label_col} data with positive turnover.")
+        return None
 
-    color_col = "avg_return_pct" if "avg_return_pct" in work.columns else None
     hover_data = _build_treemap_hover_data(work, label_col)
 
-    treemap_kwargs = {
-        "data_frame": work,
-        "path": [label_col],
-        "values": "total_turnover",
-        "title": title,
-        "hover_data": hover_data,
-        "color_continuous_scale": RETURN_COLOR_SCALE,
-        "color_continuous_midpoint": 0,
-    }
-    if color_col is not None:
-        treemap_kwargs["color"] = color_col
+    color_df = work.copy()
+    color_df["avg_return_pct_color"] = color_df["avg_return_pct"].fillna(0)
 
-    fig = px.treemap(**treemap_kwargs)
+    fig = px.treemap(
+        color_df,
+        path=[label_col],
+        values="total_turnover",
+        color="avg_return_pct_color",
+        title=title,
+        hover_data=hover_data,
+        color_continuous_scale=RETURN_COLOR_SCALE,
+        color_continuous_midpoint=0,
+    )
     fig.update_traces(
         textinfo="label+value+percent parent",
         texttemplate="<b>%{label}</b><br>%{value:,.0f}",
@@ -139,7 +162,7 @@ def _render_trend_treemap(
     return fig
 
 
-def render_market_heatmap(industry_df: pd.DataFrame) -> go.Figure:
+def render_market_heatmap(industry_df: pd.DataFrame) -> go.Figure | None:
     """Treemap of industry turnover colored by average return."""
     return _render_trend_treemap(
         industry_df,
@@ -148,7 +171,7 @@ def render_market_heatmap(industry_df: pd.DataFrame) -> go.Figure:
     )
 
 
-def render_subsector_heatmap(subsector_df: pd.DataFrame) -> go.Figure:
+def render_subsector_heatmap(subsector_df: pd.DataFrame) -> go.Figure | None:
     """Treemap of sub-sector turnover colored by average return."""
     return _render_trend_treemap(
         subsector_df,
@@ -157,14 +180,14 @@ def render_subsector_heatmap(subsector_df: pd.DataFrame) -> go.Figure:
     )
 
 
-def render_signal_bar(signal_summary_df: pd.DataFrame) -> go.Figure:
+def render_signal_bar(signal_summary_df: pd.DataFrame) -> go.Figure | None:
     """Bar chart of signal counts by signal name."""
     if signal_summary_df is None or signal_summary_df.empty:
-        return _empty_figure("No signal summary data available.")
+        return None
 
     required = {"signal_name", "count"}
     if not required.issubset(signal_summary_df.columns):
-        return _empty_figure("Signal summary requires signal_name and count columns.")
+        return None
 
     work = signal_summary_df.copy()
     work["signal_name"] = work["signal_name"].astype(str)
@@ -172,7 +195,7 @@ def render_signal_bar(signal_summary_df: pd.DataFrame) -> go.Figure:
     work = work.sort_values("count", ascending=True)
 
     if work.empty or work["count"].sum() == 0:
-        return _empty_figure("No signal counts to display.")
+        return None
 
     fig = px.bar(
         work,
@@ -182,7 +205,7 @@ def render_signal_bar(signal_summary_df: pd.DataFrame) -> go.Figure:
         title="Signal Count Summary",
         labels={"count": "Count", "signal_name": "Signal"},
         color="count",
-        color_continuous_scale=[COLOR_NEUTRAL, COLOR_POSITIVE],
+        color_continuous_scale=[COLOR_NEUTRAL, COLOR_UP],
     )
     fig.update_layout(
         margin={"t": 40, "l": 10, "r": 10, "b": 10},
