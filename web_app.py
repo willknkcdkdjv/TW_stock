@@ -41,6 +41,11 @@ from signal_engine import (
     score_signals,
 )
 from watchlist_builder import build_watchlist, watchlist_debug_summary
+from visualization import (
+    format_return_color,
+    render_market_heatmap,
+    render_subsector_heatmap,
+)
 
 
 st.set_page_config(
@@ -147,6 +152,98 @@ def enrich_industry_columns(df: pd.DataFrame) -> pd.DataFrame:
     else:
         enriched["industry_name"] = "Unknown"
     return enriched
+
+
+def _format_return_label(value) -> str:
+    numeric = pd.to_numeric(value, errors="coerce")
+    color = format_return_color(numeric)
+    if pd.isna(numeric):
+        text = "N/A"
+    else:
+        text = f"{float(numeric):.2f}%"
+    return f'<span style="color:{color}; font-weight:600;">{text}</span>'
+
+
+def render_watchlist_cards(watchlist: pd.DataFrame, top_n: int = 10) -> None:
+    if watchlist is None or watchlist.empty:
+        return
+
+    top = remove_duplicate_columns(watchlist.head(top_n))
+    st.subheader(f"Top {min(top_n, len(top))} Watchlist")
+
+    for row_start in range(0, len(top), 5):
+        chunk = top.iloc[row_start:row_start + 5]
+        cols = st.columns(len(chunk))
+        for col, (_, row) in zip(cols, chunk.iterrows()):
+            with col:
+                with st.container(border=True):
+                    stock_id = row.get("stock_id", "")
+                    stock_name = row.get("stock_name", "")
+                    st.markdown(f"**{stock_id}** {stock_name}")
+                    signal_score = row.get("signal_score", "")
+                    st.write(f"Signal score: {signal_score}")
+                    st.markdown(
+                        f"Return: {_format_return_label(row.get('return_pct'))}",
+                        unsafe_allow_html=True,
+                    )
+                    amount = pd.to_numeric(row.get("amount"), errors="coerce")
+                    amount_text = f"{amount:,.0f}" if pd.notna(amount) else "N/A"
+                    st.write(f"Turnover: {amount_text}")
+                    reason = row.get("signal_reason", "")
+                    if pd.notna(reason) and str(reason).strip():
+                        st.caption(str(reason))
+
+
+def render_visual_overview(
+    filtered: pd.DataFrame,
+    latest: pd.DataFrame,
+    market_return: float,
+    wl_min_turnover: int,
+    wl_min_signal_score: int,
+    wl_industry: str,
+    wl_sub_sector: str,
+) -> None:
+    st.caption("Visual summary of market breadth, sector turnover, and top watchlist picks.")
+
+    st.subheader("Market Breadth")
+    breadth = get_market_breadth(latest)
+    b1, b2, b3, b4, b5 = st.columns(5)
+    b1.metric("Total Stocks", f"{breadth['total_stocks']:,}")
+    b2.metric("Up / Down / Flat", f"{breadth['up_count']:,} / {breadth['down_count']:,} / {breadth['flat_count']:,}")
+    b3.metric("Up Ratio", f"{breadth['up_ratio'] * 100:.1f}%")
+    b4.metric("Avg Return", f"{breadth['average_return']:.2f}%")
+    b5.metric("Median Return", f"{breadth['median_return']:.2f}%")
+
+    st.subheader("Market Heatmap")
+    industry_trend = remove_duplicate_columns(get_industry_trend(filtered))
+    st.plotly_chart(
+        render_market_heatmap(industry_trend),
+        use_container_width=True,
+    )
+
+    st.subheader("Sub-sector Heatmap")
+    subsector_trend = remove_duplicate_columns(get_subsector_trend(filtered))
+    st.plotly_chart(
+        render_subsector_heatmap(subsector_trend),
+        use_container_width=True,
+    )
+
+    universe = apply_sector_mapping(enrich_industry_columns(latest))
+    if "signal_score" not in universe.columns:
+        universe = score_signals(universe, market_return)
+
+    watchlist = build_watchlist(
+        universe,
+        max_rows=50,
+        min_amount=wl_min_turnover,
+        min_signal_score=wl_min_signal_score,
+        industry=wl_industry,
+        sub_sector=wl_sub_sector,
+    )
+    if not watchlist.empty:
+        render_watchlist_cards(watchlist, top_n=10)
+    else:
+        st.info("No watchlist stocks available for card view with current filters.")
 
 
 def apply_signal_scanner_filters(
@@ -563,8 +660,9 @@ def main():
     else:
         market_return = 0.0
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13 = st.tabs([
         "Market Scan",
+        "Visual Overview",
         "Volume Spike",
         "Breakout",
         "Top Turnover",
@@ -583,28 +681,39 @@ def main():
         show_table("Top Losers", get_top_losers(filtered))
 
     with tab2:
+        render_visual_overview(
+            filtered,
+            latest,
+            market_return,
+            wl_min_turnover,
+            wl_min_signal_score,
+            wl_industry,
+            wl_sub_sector,
+        )
+
+    with tab3:
         show_table(
             "Volume Spike: Volume >= 2x 20D Average",
             get_volume_spike(filtered),
         )
 
-    with tab3:
+    with tab4:
         show_table(
             "Breakout: Close > Previous 20D High and Volume >= 1.5x",
             get_breakout(filtered),
         )
 
-    with tab4:
+    with tab5:
         show_table("Top Turnover", get_top_turnover(filtered))
 
-    with tab5:
+    with tab6:
         if valuation.empty:
             st.info("No valuation data available.")
         else:
             show_table("Cheap Value: PE <= 15 and PB <= 1.5", get_cheap_value(valuation))
             show_table("High Dividend: Dividend Yield >= 4%", get_high_dividend(valuation))
 
-    with tab6:
+    with tab7:
         industry_trend = get_industry_trend(filtered)
         if not snapshot.get("industry_profile_loaded", False):
             st.warning(
@@ -623,16 +732,16 @@ def main():
             hide_index=True,
         )
 
-    with tab7:
+    with tab8:
         render_subsector_trend(filtered)
 
-    with tab8:
+    with tab9:
         render_market_regime(latest)
 
-    with tab9:
+    with tab10:
         render_signal_scanner(latest, market_return)
 
-    with tab10:
+    with tab11:
         render_watchlist(
             latest,
             latest_date,
@@ -643,14 +752,14 @@ def main():
             wl_sub_sector,
         )
 
-    with tab11:
+    with tab12:
         show_table(
             "Latest Raw Price Data",
             filtered.sort_values("amount", ascending=False),
             height=600,
         )
 
-    with tab12:
+    with tab13:
         render_ai_analyst_chat(
             snapshot, filtered, valuation, latest_date, min_amount, keyword
         )
