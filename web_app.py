@@ -1320,63 +1320,8 @@ def render_market_regime(latest: pd.DataFrame) -> None:
     st.markdown(summary)
 
 
-def render_methodology_guide() -> None:
-    st.caption(
-        "Reference guide for dashboard metrics, signals, and watchlist methodology."
-    )
-
-    st.markdown("### A. Dashboard Purpose")
-    st.markdown(
-        """
-This dashboard is a **trader research tool**, not a buy/sell recommendation system.
-It is designed to help you:
-
-- Assess **market regime** (breadth, size/style behavior, sector leadership)
-- Monitor **sector and sub-sector rotation**
-- Surface **abnormal turnover activity** relative to each stock's own history
-- Build a **rule-based watchlist** of candidates worth further research
-
-All outputs are deterministic and based on price, volume, and turnover data.
-They should be combined with your own judgment, risk controls, and additional research.
-        """
-    )
-
-    st.markdown("### B. Key Metrics")
-    st.markdown(
-        """
-| Metric | Definition |
-|--------|------------|
-| **Turnover / Amount** | Total traded value (price × volume). Used mainly as a **liquidity filter**, not as a standalone alpha signal. Large-cap names naturally rank higher on raw turnover. |
-| **Turnover / 20D Avg** | Today's turnover divided by the stock's 20-day average turnover. Values above 1.0 mean above-normal money flow; **≥ 2.0** indicates a significant spike relative to recent history. |
-| **60D Turnover Percentile** | Today's turnover ranked against the same stock's prior 60 trading-day observations. **90** means today's turnover exceeds 90% of its own past 60 observations — a stock-specific abnormal activity measure. |
-| **Return %** | Daily percentage change versus the previous close: `(close / prev_close − 1) × 100`. |
-| **Volume Ratio 20D** | Today's share volume divided by the 20-day average volume. Complements turnover-based activity measures. |
-| **Liquidity Amount** | Sidebar minimum turnover threshold. Stocks below this level are excluded to avoid illiquid names. This filter does **not** add to Hotness Score or Technical Score. |
-        """
-    )
-
-    st.markdown("### C. Scoring System")
-    st.markdown(
-        """
-The dashboard uses **two independent scores** to surface candidates for further research.
-Neither score is a buy or sell recommendation. Both are rule-based summaries of the latest
-session's data.
-        """
-    )
-
-    st.markdown("#### Hotness Score")
-    st.markdown(
-        """
-**Purpose:** Measures **market attention and popularity** on a **0–100** scale — how much
-interest a stock is attracting relative to its own history, the broader market, and its
-sector context.
-
-Hotness Score does **not** tell you whether to buy or sell. It identifies names that are
-currently standing out in terms of activity and attention.
-        """
-    )
-
-    hotness_table = pd.DataFrame(
+def _methodology_hotness_table_en() -> pd.DataFrame:
+    return pd.DataFrame(
         [
             {"Component": "Turnover Percentile 60D", "Maximum Points": 30},
             {"Component": "Turnover / 20D Avg", "Maximum Points": 20},
@@ -1387,35 +1332,24 @@ currently standing out in terms of activity and attention.
             {"Component": "Total maximum", "Maximum Points": 100},
         ]
     )
-    st.table(hotness_table)
 
-    st.markdown(
-        """
-**How to read it:** The main drivers of Hotness Score are **abnormal turnover relative to
-the stock's own history** (percentile and 20D ratio), **relative strength** versus the
-market, and **sector / theme heat**. These components carry most of the weight.
 
-**Raw turnover participation:** Raw turnover (amount) is included only as a **small
-participation component** (maximum 10 points). It helps prevent illiquid names from ranking
-too highly when other activity signals are weak, but it **does not dominate** the score.
-It does not replace turnover percentile or turnover ratio — a stock cannot score highly on
-hotness from raw size alone.
-
-The sidebar **Minimum Liquidity Amount** is a separate **filter** that removes names too
-illiquid for practical research. It is not a scoring component.
-        """
+def _methodology_hotness_table_zh() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {"項目": "60 日成交金額分位數", "最高分": 30},
+            {"項目": "成交金額 / 20 日均值", "最高分": 20},
+            {"項目": "相對強度", "最高分": 20},
+            {"項目": "產業 / 題材熱度", "最高分": 15},
+            {"項目": "成交金額參與度", "最高分": 10},
+            {"項目": "技術確認加分", "最高分": 5},
+            {"項目": "合計上限", "最高分": 100},
+        ]
     )
 
-    st.markdown("#### Technical Score")
-    st.markdown(
-        """
-**Purpose:** Measures **technical setup quality** — how many independent technical patterns
-are active on the latest bar. Technical Score reflects the strength of the price and activity
-setup, independent of market-wide attention.
-        """
-    )
 
-    technical_table = pd.DataFrame(
+def _methodology_technical_table_en() -> pd.DataFrame:
+    return pd.DataFrame(
         [
             {"Component": "Confirmed Breakout", "Points": "+3"},
             {"Component": "Price Breakout only", "Points": "+1"},
@@ -1426,44 +1360,276 @@ setup, independent of market-wide attention.
             {"Component": "Momentum", "Points": "+1"},
         ]
     )
-    st.table(technical_table)
 
+
+def _methodology_technical_table_zh() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {"項目": "確認突破（Confirmed Breakout）", "分數": "+3"},
+            {"項目": "價格突破（Price Breakout only）", "分數": "+1"},
+            {"項目": "相對強度", "分數": "+2"},
+            {"項目": "成交金額 / 20 日均值 ≥ 2", "分數": "+2"},
+            {"項目": "60 日成交金額分位數 ≥ 95", "分數": "+2"},
+            {"項目": "60 日成交金額分位數 ≥ 90（未達 95）", "分數": "+1"},
+            {"項目": "短線動能（Momentum）", "分數": "+1"},
+        ]
+    )
+
+
+def _render_methodology_english() -> None:
+    st.markdown("### A. Dashboard Purpose")
     st.markdown(
         """
-Technical Score components are additive. Multiple conditions can be met on the same session.
-The legacy `signal_score` column, when present in underlying data, is displayed as
-**Technical Score** for backward compatibility.
+This dashboard is a **trader research tool**, not a buy/sell recommendation system.
+It helps you quickly assess:
+
+- Whether the **market is strong or weak**
+- Which **industries or themes** are attracting capital
+- Which stocks are gaining **market attention**
+- Which names belong on your **watchlist** for further research
+
+All outputs are rule-based and derived from price, volume, and turnover data.
+Combine them with your own judgment and risk controls.
         """
     )
 
-    st.markdown("#### Watchlist Ranking")
+    st.markdown("### B. Key Metrics")
     st.markdown(
         """
-The watchlist combines both scores with a liquidity gate:
-
-1. **Liquidity filter** — stocks below the minimum liquidity amount (default: NT$ 50M) are
-   excluded. This removes names that are too illiquid; it does not add to either score.
-2. **Hotness threshold** — stocks must meet the sidebar minimum hotness score (default: 20).
-3. **Optional technical floor** — an advanced filter can require a minimum technical score.
-4. **Default ranking** — candidates are sorted by **Hotness Score** (descending) first.
-   **Technical Score** is the secondary sort key, followed by 60D turnover percentile and
-   amount.
-
-**Visual Overview** displays the top 10 watchlist cards. The **Watchlist** tab shows the
-full ranked list (up to 50 rows) with CSV download.
+| Metric | Definition |
+|--------|------------|
+| **Turnover / Amount** | Total traded value today (price × volume). Reflects market participation and liquidity, but **high turnover alone does not mean buy**. Large caps naturally have higher absolute turnover. |
+| **Turnover / 20D Avg** | Today's turnover ÷ 20-day average turnover. **2.0×** means today is twice the recent average — a better abnormal-activity signal than raw amount alone. |
+| **60D Turnover Percentile** | Today's turnover ranked against the stock's own prior 60 sessions. **95** means today exceeds 95% of its past 60 trading days — a stock-specific attention measure. |
+| **Return %** | Daily percentage change vs. the previous close. |
+| **Volume Ratio 20D** | Today's volume ÷ 20-day average volume. Indicates whether share volume is expanding. |
+| **Minimum Liquidity Amount** | Sidebar filter excluding illiquid names. A **filter only** — not a scoring input. |
         """
     )
 
-    st.markdown("### D. Interpretation Notes")
+    st.markdown("### C. Hotness Score")
     st.markdown(
         """
-- **High turnover alone does not mean buy.** A large company can have high absolute turnover every day without abnormal activity. Raw turnover adds at most 10 hotness points; percentile and ratio matter more.
-- **Turnover percentile is more meaningful than raw turnover.** It compares today's activity against the stock's own recent history.
-- **Breakout with turnover expansion is stronger than breakout alone.** A price breakout accompanied by elevated turnover ratio or percentile suggests broader participation.
-- **Insufficient history produces N/A values.** Metrics such as Turnover / 20D Avg and 60D Turnover Percentile require adequate trading history (typically 20+ and 60+ prior observations per stock). When history is limited, filters may be skipped and warnings will appear.
-- **Taiwan color convention:** positive returns are shown in red; negative returns in green.
+**Purpose:** Measures whether the market is **paying attention** to a stock recently (0–100).
+This is **not** a buy/sell signal and **not** a technical entry signal.
+
+**Main drivers:** abnormal turnover vs. the stock's own history, relative strength, and
+sector/theme heat. Raw turnover adds at most 10 participation points and does not dominate.
         """
     )
+    st.table(_methodology_hotness_table_en())
+
+    st.markdown("### D. Technical Score")
+    st.markdown(
+        """
+**Purpose:** Measures **technical setup quality** — how clean the price/activity pattern is.
+Unlike Hotness Score, this focuses on **setup**, not market attention.
+
+Components are additive. The legacy `signal_score` column is displayed as **Technical Score**
+when present.
+        """
+    )
+    st.table(_methodology_technical_table_en())
+
+    st.markdown("### E. Breakout")
+    st.markdown(
+        """
+| Type | Definition |
+|------|------------|
+| **Price Breakout** | Close is above the previous 20-day high. |
+| **Confirmed Breakout** | Close breaks the previous 20-day high **and** turnover / 20D avg expands (≥ 1.5×). |
+| **Near Breakout** | Close is within **3% below** the previous 20-day high. Not a confirmed breakout, but useful for watchlists. |
+        """
+    )
+
+    st.markdown("### F. Watchlist Selection")
+    st.markdown(
+        """
+Watchlist ranking logic:
+
+1. **Minimum Liquidity Amount** — exclude illiquid names (filter only)
+2. **Hotness Score** — primary rank (sidebar minimum, default 20)
+3. **Technical Score** — secondary rank
+4. **60D Turnover Percentile** — tertiary rank
+5. **Turnover / Amount** — final tie-breaker
+
+**Visual Overview** shows the top 10 cards. The **Watchlist** tab shows the full list (up to 50 rows).
+        """
+    )
+
+    st.markdown("### G. Important Notes")
+    st.markdown(
+        """
+- High turnover alone does **not** mean buy.
+- High Hotness Score means high attention — **not** guaranteed upside.
+- High Technical Score means a cleaner setup — still requires risk control.
+- Near Breakout is **not** a confirmed breakout.
+- 20D / 60D metrics may show **N/A** when history is insufficient.
+- Taiwan color convention: up = red, down = green.
+- This dashboard provides **no buy/sell recommendations**.
+        """
+    )
+
+
+def _render_methodology_chinese() -> None:
+    st.markdown("### A. 儀表板用途")
+    st.markdown(
+        """
+這個系統是**交易研究工具**，不是買賣建議工具。
+
+它的目的是幫助使用者快速判斷：
+
+- 市場目前是**強還是弱**
+- 資金流向哪些**產業或題材**
+- 哪些股票最近**市場關注度提高**
+- 哪些股票適合放進**觀察名單**
+
+所有結果都來自價格、成交量與成交金額的規則計算，仍需搭配使用者自己的判斷與風險控管。
+        """
+    )
+
+    st.markdown("### B. 主要指標說明")
+    st.markdown(
+        """
+**成交金額（Turnover / Amount）**
+
+今日該股票總成交金額。可理解為市場參與度或流動性。
+但單純成交金額大，不代表一定值得買。大型權值股通常成交金額本來就大。
+
+**成交金額相對 20 日均值（Turnover / 20D Avg）**
+
+今日成交金額 ÷ 過去 20 日平均成交金額。
+例如 2.0x 代表今天成交金額是過去 20 日平均的 2 倍。
+這比單純成交金額更能看出「異常放大」。
+
+**60 日成交金額分位數（60D Turnover Percentile）**
+
+將今日成交金額和該股票自己過去 60 個交易日比較。
+例如 95 代表今天成交金額高於過去 60 天中 95% 的交易日。
+這個指標用來判斷「今天是不是特別多人關注這檔股票」。
+
+**漲跌幅（Return %）**
+
+今日收盤價相對前一交易日收盤價的漲跌百分比。
+
+**成交量相對 20 日均量（Volume Ratio 20D）**
+
+今日成交量 ÷ 過去 20 日平均成交量。用來判斷成交量是否明顯放大。
+
+**最低流動性門檻（Minimum Liquidity Amount）**
+
+用來排除成交太冷清的股票。這是**篩選條件**，不是評分來源。
+        """
+    )
+
+    st.markdown("### C. 熱門度分數（Hotness Score）")
+    st.markdown(
+        """
+**用途：** 衡量「市場最近是否正在關注這檔股票」（0–100 分）。
+
+這**不是**買賣建議，也**不是**技術面進場訊號。
+
+**主要分數來源：** 相對自身歷史的異常成交、相對市場的強弱、以及產業/題材熱度。
+成交金額參與度最多只加 10 分，不會主導整體分數。
+        """
+    )
+    st.table(_methodology_hotness_table_zh())
+    st.markdown(
+        """
+- **60 日成交金額分位數（最高 30 分）：** 成交金額是否位於自己過去 60 日高分位
+- **成交金額 / 20 日均值（最高 20 分）：** 成交金額是否明顯高於近期平均
+- **相對強度（最高 20 分）：** 個股表現是否強於市場中位數
+- **產業 / 題材熱度（最高 15 分）：** 是否屬於今日熱門產業或題材
+- **成交金額參與度（最高 10 分）：** 今日成交金額是否具備一定市場參與度，但權重不高
+- **技術確認加分（最高 5 分）：** 是否有突破或短線動能確認
+        """
+    )
+
+    st.markdown("### D. 技術分數（Technical Score）")
+    st.markdown(
+        """
+**用途：** 衡量**技術型態是否漂亮**。
+
+它和 Hotness Score 不一樣：Hotness Score 看**市場關注度**，Technical Score 看**技術 setup**。
+多項條件可同時成立、分數可累加。舊版 `signal_score` 欄位會以 Technical Score 顯示。
+        """
+    )
+    st.table(_methodology_technical_table_zh())
+    st.markdown(
+        """
+- **確認突破（+3）：** 收盤價突破過去 20 日高點，且成交金額相對 20 日均值放大
+- **價格突破（+1）：** 僅收盤價突破，尚未達確認突破條件
+- **相對強度（+2）：** 個股漲跌幅優於市場中位數
+- **成交金額 / 20 日均值 ≥ 2（+2）：** 成交金額至少是 20 日平均的 2 倍
+- **60 日成交金額分位數 ≥ 95（+2）：** 成交金額位於自己過去 60 日極高分位
+- **60 日成交金額分位數 ≥ 90（+1）：** 成交金額位於自己過去 60 日高分位（未達 95）
+- **短線動能（+1）：** 短期均線或價格動能偏強
+        """
+    )
+
+    st.markdown("### E. 突破說明（Breakout）")
+    st.markdown(
+        """
+**Price Breakout（價格突破）**
+
+收盤價高於過去 20 日高點。
+
+**Confirmed Breakout（確認突破）**
+
+收盤價突破過去 20 日高點，且成交金額也放大（相對 20 日均值 ≥ 1.5 倍）。
+
+**Near Breakout（接近突破）**
+
+收盤價距離過去 20 日高點不到 3%。
+這**不是**正式突破，但可以作為觀察名單候選。
+        """
+    )
+
+    st.markdown("### F. 觀察名單選股邏輯（Watchlist Selection）")
+    st.markdown(
+        """
+Watchlist 的排序邏輯：
+
+1. 先用 **Minimum Liquidity Amount** 排除流動性太低的股票
+2. 再看 **Hotness Score**（熱門度分數，側邊欄可設最低門檻，預設 20）
+3. 再看 **Technical Score**（技術分數）
+4. 再看 **60D Turnover Percentile**（60 日成交金額分位數）
+5. 最後才看 **成交金額**
+
+**Visual Overview** 只顯示 Top 10。
+**Watchlist** 分頁顯示完整候選名單（最多 50 檔，可下載 CSV）。
+        """
+    )
+
+    st.markdown("### G. 重要提醒")
+    st.markdown(
+        """
+- 成交金額大，不代表一定值得買。
+- Hotness Score 高代表市場關注度高，不代表一定會上漲。
+- Technical Score 高代表技術型態較完整，但仍需風險控管。
+- Near Breakout 只是接近突破，不是突破確認。
+- 如果歷史資料不足，20D / 60D 指標可能會顯示 N/A。
+- 台股配色：上漲為紅色，下跌為綠色。
+- 本 dashboard **不提供任何買賣建議**。
+        """
+    )
+
+
+def render_methodology_guide() -> None:
+    st.caption("儀表板指標、評分與觀察名單方法說明 / Dashboard methodology reference.")
+
+    language = st.radio(
+        "Language / 語言",
+        options=["繁體中文", "English"],
+        index=0,
+        horizontal=True,
+        key="methodology_language",
+    )
+
+    if language == "English":
+        _render_methodology_english()
+    else:
+        _render_methodology_chinese()
 
 
 def show_table(
