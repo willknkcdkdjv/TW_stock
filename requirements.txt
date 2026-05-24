@@ -5,4 +5,4 @@ requests
 xlsxwriter
 python-dotenv
 openai
-plotlyplotly
+plotly
